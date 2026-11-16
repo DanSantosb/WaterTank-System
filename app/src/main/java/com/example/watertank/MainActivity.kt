@@ -4,8 +4,20 @@ package com.example.watertank
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 
-
 import android.os.Bundle
+import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothSocket
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.IOException
+import java.util.UUID
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -33,12 +45,10 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Button
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.DropdownMenuItem
 import java.util.Locale
 
 import com.example.watertank.ui.theme.WATERTANKTheme
@@ -50,15 +60,162 @@ private val Texto = Color(0xFF152238)
 private val Cinza = Color(0xFF718096)
 
 class MainActivity : ComponentActivity() {
+
+    private val sppUuid: UUID =
+        UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+
+    @Volatile private var bluetoothSocket: BluetoothSocket? = null
+    @Volatile private var pararLeitura = false
+    private lateinit var permissaoBluetoothLauncher: ActivityResultLauncher<String>
+
+    private var dadosCaixa by mutableStateOf(DadosCaixa())
+    private var statusConexao by mutableStateOf("Desconectado")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        permissaoBluetoothLauncher =
+            registerForActivityResult(ActivityResultContracts.RequestPermission()) { concedida ->
+                if (concedida) {
+                    iniciarConexaoBluetooth()
+                } else {
+                    statusConexao = "Permissão Bluetooth negada"
+                }
+            }
+
         setContent {
             WATERTANKTheme {
-                HomeScreen()
+                HomeScreen(
+                    dados = dadosCaixa,
+                    statusConexao = statusConexao,
+                    onConectar = { solicitarConexaoBluetooth() },
+                    onDesconectar = { desconectarBluetooth() }
+                )
             }
         }
     }
+
+    private fun solicitarConexaoBluetooth() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissaoBluetoothLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            iniciarConexaoBluetooth()
+        }
+    }
+
+    @Suppress("MissingPermission")
+    private fun iniciarConexaoBluetooth() {
+        if (bluetoothSocket?.isConnected == true) {
+            statusConexao = "Conectado"
+            return
+        }
+
+        statusConexao = "Procurando WaterTank_ESP32..."
+        pararLeitura = false
+
+        Thread {
+            try {
+                val adapter = BluetoothAdapter.getDefaultAdapter()
+                    ?: throw IOException("Este aparelho não possui Bluetooth.")
+
+                if (!adapter.isEnabled) {
+                    throw IOException("Ative o Bluetooth do celular.")
+                }
+
+                val dispositivo: BluetoothDevice = adapter.bondedDevices
+                    .firstOrNull { it.name == "WaterTank_ESP32" }
+                    ?: throw IOException("Dispositivo não pareado. Pareie WaterTank_ESP32 nas configurações do Android.")
+
+                val socket = dispositivo.createRfcommSocketToServiceRecord(sppUuid)
+                bluetoothSocket = socket
+                socket.connect()
+
+                runOnUiThread {
+                    statusConexao = "Conectado a WaterTank_ESP32"
+                    dadosCaixa = dadosCaixa.copy(sensorConectado = true)
+                }
+
+                val leitor = BufferedReader(InputStreamReader(socket.inputStream))
+                while (!pararLeitura) {
+                    val linha = leitor.readLine() ?: break
+                    processarLinhaBluetooth(linha)
+                }
+
+                if (!pararLeitura) {
+                    runOnUiThread {
+                        statusConexao = "Conexão encerrada"
+                        dadosCaixa = dadosCaixa.copy(sensorConectado = false)
+                    }
+                }
+            } catch (e: SecurityException) {
+                if (!pararLeitura) runOnUiThread {
+                    statusConexao = "Sem permissão para acessar o Bluetooth"
+                    dadosCaixa = dadosCaixa.copy(sensorConectado = false)
+                }
+            } catch (e: Exception) {
+                if (!pararLeitura) runOnUiThread {
+                    statusConexao = e.message ?: "Falha na conexão Bluetooth"
+                    dadosCaixa = dadosCaixa.copy(sensorConectado = false)
+                }
+            } finally {
+                try { bluetoothSocket?.close() } catch (_: Exception) {}
+                bluetoothSocket = null
+            }
+        }.start()
+    }
+
+    private fun processarLinhaBluetooth(linha: String) {
+        try {
+            val json = JSONObject(linha)
+            val ph = json.optNullableDouble("ph")
+            val tds = json.optNullableDouble("tds")
+            val temperatura = json.optNullableDouble("temperatura")
+            val vazao = json.optNullableDouble("vazao")
+            val falhas = if (json.has("falhas") && !json.isNull("falhas")) json.optInt("falhas") else null
+            val dataHora = if (json.has("data_hora") && !json.isNull("data_hora")) json.optString("data_hora") else null
+            val rtcValido = if (json.has("rtc_valido") && !json.isNull("rtc_valido")) json.optBoolean("rtc_valido") else null
+
+            runOnUiThread {
+                dadosCaixa = dadosCaixa.copy(
+                    sensorConectado = true,
+                    ph = ph,
+                    tds = tds,
+                    temperatura = temperatura,
+                    vazao = vazao,
+                    falhas = falhas,
+                    dataHora = dataHora,
+                    rtcValido = rtcValido
+                )
+                statusConexao = "Conectado a WaterTank_ESP32"
+            }
+        } catch (_: Exception) {
+            // Ignora linhas que não sejam um JSON válido.
+        }
+    }
+
+    private fun desconectarBluetooth() {
+        pararLeitura = true
+        try {
+            bluetoothSocket?.close()
+        } catch (_: Exception) {
+        }
+        bluetoothSocket = null
+        dadosCaixa = dadosCaixa.copy(sensorConectado = false)
+        statusConexao = "Desconectado"
+    }
+
+    override fun onDestroy() {
+        desconectarBluetooth()
+        super.onDestroy()
+    }
+}
+
+private fun JSONObject.optNullableDouble(chave: String): Double? {
+    if (!has(chave) || isNull(chave)) return null
+    val valor = optDouble(chave, Double.NaN)
+    return valor.takeIf { it.isFinite() }
 }
 
 data class DadosCaixa(
@@ -67,7 +224,14 @@ data class DadosCaixa(
     val capacidadeLitros: Int = 1000,
     val consumoHojeLitros: Int? = null,
     val sensorConectado: Boolean = false,
-    val alerta: String? = null
+    val alerta: String? = null,
+    val ph: Double? = null,
+    val tds: Double? = null,
+    val temperatura: Double? = null,
+    val vazao: Double? = null,
+    val falhas: Int? = null,
+    val dataHora: String? = null,
+    val rtcValido: Boolean? = null
 )
 
 @Composable
@@ -223,6 +387,38 @@ fun InicioContent(
                 )
             }
 
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Leituras dos sensores",
+                        color = Texto,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("pH: ${dados.ph?.let { String.format(Locale.US, "%.2f", it) } ?: "--"}", color = Texto)
+                    Text("TDS: ${dados.tds?.let { String.format(Locale.US, "%.2f ppm", it) } ?: "--"}", color = Texto)
+                    Text("Temperatura: ${dados.temperatura?.let { String.format(Locale.US, "%.2f °C", it) } ?: "--"}", color = Texto)
+                    Text("Vazão: ${dados.vazao?.let { String.format(Locale.US, "%.2f L/min", it) } ?: "--"}", color = Texto)
+                    Text("Falhas: ${dados.falhas?.toString() ?: "--"}", color = Texto)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = dados.dataHora?.let { "Atualizado em: $it" } ?: "Aguardando data e hora do ESP32...",
+                        color = Cinza,
+                        fontSize = 12.sp
+                    )
+                    if (dados.rtcValido == false) {
+                        Text("Atenção: relógio RTC inválido.", color = Color(0xFFD97706), fontSize = 12.sp)
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(24.dp))
 
             Text(
@@ -289,7 +485,12 @@ fun InfoCard(
 
 
 @Composable
-fun HomeScreen() {
+fun HomeScreen(
+    dados: DadosCaixa,
+    statusConexao: String,
+    onConectar: () -> Unit,
+    onDesconectar: () -> Unit
+) {
     var paginaSelecionada by rememberSaveable {
         mutableIntStateOf(0)
     }
@@ -361,7 +562,7 @@ fun HomeScreen() {
                 .padding(padding)
         ) {
             when (paginaSelecionada) {
-                0 -> InicioContent()
+                0 -> InicioContent(dados = dados.copy(capacidadeLitros = capacidadeLitros))
                 1 -> HistoricoContent()
                 2 -> AlertasContent()
                 3 -> ConfiguracoesContent(
@@ -383,7 +584,10 @@ fun HomeScreen() {
                     configuracaoSalva = configuracaoSalva,
                     onSalvar = {
                         configuracaoSalva = true
-                    }
+                    },
+                    statusConexao = statusConexao,
+                    onConectar = onConectar,
+                    onDesconectar = onDesconectar
                 )
             }
         }
@@ -447,7 +651,10 @@ fun ConfiguracoesContent(
     tarifaReferencia: String,
     onTarifaChange: (String) -> Unit,
     configuracaoSalva: Boolean,
-    onSalvar: () -> Unit
+    onSalvar: () -> Unit,
+    statusConexao: String,
+    onConectar: () -> Unit,
+    onDesconectar: () -> Unit
 ) {
 
     var menuAberto by rememberSaveable { mutableStateOf(false) }
@@ -638,8 +845,34 @@ fun ConfiguracoesContent(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "A configuração da conexão será implementada aqui.",
-                color = Cinza
+                text = "Status: $statusConexao",
+                color = if (statusConexao.startsWith("Conectado")) Color(0xFF21834A) else Cinza,
+                fontWeight = FontWeight.SemiBold
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (statusConexao.startsWith("Conectado")) {
+                OutlinedButton(
+                    onClick = onDesconectar,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Desconectar")
+                }
+            } else {
+                Button(
+                    onClick = onConectar,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Conectar ao ESP32")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "O ESP32 precisa estar pareado com o celular como WaterTank_ESP32. Feche o Serial Bluetooth Terminal antes de conectar pelo WATERTANK.",
+                color = Cinza,
+                fontSize = 12.sp
             )
         }
     }
