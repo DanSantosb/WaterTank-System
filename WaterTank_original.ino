@@ -113,7 +113,7 @@ void registrarLeitura(uint8_t bit, int &contador, bool leituraValida, const char
 // ---------- VARIAVEIS GLOBAIS ----------
 float valorPH =             0;           
 float valorTDS =            0;            
-float valorTemperatura =   25;  // °C (comeca em 25 para a compensacao do TDS)
+float valorTemperatura =    25;  // °C (comeca em 25 para a compensacao do TDS)
 float volumeCaixaL =        0;  // volume atual de agua dentro da caixa (litros)
 float vazaoLMin =           0;  // vazao atual (L/min)
 float volumeTotalL =        0;  // litros que passaram pelo sensor de vazao no mes atual (zera a cada mes)
@@ -185,7 +185,7 @@ void lerPH(){
   float ph = 7.0 + ((2.5 - tensao) / 0.18);
 
   // Tensao no limite do ADC (sensor desconectado/em curto) ou pH impossivel = leitura invalida
-  bool leituraValida = !(tensaoPino < 0.05 || tensaoPino > 3.1 || ph < 0.0 || ph > 14.0);
+  bool leituraValida = !(tensaoPino < 0.05 || tensaoPino > 3.1 || ph < 0.0 || ph > 140.0);
 
   registrarLeitura(FALHA_PH, contFalhaPH, leituraValida, "pH");
 
@@ -527,7 +527,47 @@ void imprimirSerial(){
 
 // ---------- ENVIO VIA BLUETOOTH ----------
 void enviarDadosBluetooth(){
- 
+
+  if (!SerialBT.hasClient()) {
+    return;
+  }
+
+  // ---------- DATA E HORA DO RTC ----------
+
+  char dataHora[24];
+
+  if (relogioValido) {
+
+    RtcDateTime agora = Rtc.GetDateTime();
+
+    snprintf(dataHora, sizeof(dataHora),
+             "%04d-%02d-%02d %02d:%02d:%02d",
+             agora.Year(),
+             agora.Month(),
+             agora.Day(),
+             agora.Hour(),
+             agora.Minute(),
+             agora.Second());
+
+  } else {
+    strcpy(dataHora, "sem data");
+  }
+
+  // ---------- MONTAGEM DO JSON ----------
+
+  String dados = "{";
+
+  dados += "\"data_hora\":\"" + String(dataHora) + "\",";
+  dados += "\"rtc_valido\":" + String(relogioValido ? "true" : "false") + ",";
+  dados += "\"ph\":" + String(valorPH, 2) + ",";
+  dados += "\"tds\":" + String(valorTDS, 2) + ",";
+  dados += "\"temperatura\":" + String(valorTemperatura, 2) + ",";
+  dados += "\"vazao\":" + String(vazaoLMin, 2) + ",";
+  dados += "\"falhas\":" + String(falhas);
+
+  dados += "}";
+
+  SerialBT.println(dados);
 }
 
 // ---------- SETUP ----------
@@ -585,6 +625,7 @@ void loop(){
     atualizarAlertas();
     medirNivelAgua();
     imprimirSerial();
+    enviarDadosBluetooth();
   }
 
   if (millis() - ultimoCalculoVazao >= INTERVALO_VAZAO_MS) {
