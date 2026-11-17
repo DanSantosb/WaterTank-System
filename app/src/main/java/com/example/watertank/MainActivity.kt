@@ -66,10 +66,13 @@ class MainActivity : ComponentActivity() {
 
     @Volatile private var bluetoothSocket: BluetoothSocket? = null
     @Volatile private var pararLeitura = false
+
     private lateinit var permissaoBluetoothLauncher: ActivityResultLauncher<String>
 
     private var dadosCaixa by mutableStateOf(DadosCaixa())
     private var statusConexao by mutableStateOf("Desconectado")
+
+    private var alertas by mutableStateOf(listOf<Alerta>())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -87,12 +90,14 @@ class MainActivity : ComponentActivity() {
             WATERTANKTheme {
                 HomeScreen(
                     dados = dadosCaixa,
+                    alertas = alertas,
                     statusConexao = statusConexao,
                     onConectar = { solicitarConexaoBluetooth() },
                     onDesconectar = { desconectarBluetooth() }
                 )
             }
         }
+        solicitarConexaoBluetooth()
     }
 
     private fun solicitarConexaoBluetooth() {
@@ -103,6 +108,102 @@ class MainActivity : ComponentActivity() {
         } else {
             iniciarConexaoBluetooth()
         }
+    }
+
+
+    private fun horarioAtual(): String {
+        return java.text.SimpleDateFormat(
+            "dd/MM/yyyy HH:mm:ss",
+            java.util.Locale("pt", "BR")
+        ).format(java.util.Date())
+    }
+
+    private fun enviarSincronizacaoHorario(socket: BluetoothSocket) {
+        val formato = java.text.SimpleDateFormat(
+            "yyyy-MM-dd HH:mm:ss",
+            Locale.US
+        )
+
+        val horario = formato.format(java.util.Date())
+        val mensagem = "SYNC;$horario\n"
+
+        socket.outputStream.write(
+            mensagem.toByteArray(Charsets.UTF_8)
+        )
+        socket.outputStream.flush()
+    }
+
+    private fun atualizarAlerta(
+        chave: String,
+        disparou: Boolean?,
+        titulo: String,
+        descricao: String,
+        gravidade: String
+    ) {
+        // Sem leitura válida, não altera o estado do alerta.
+        if (disparou == null) return
+
+        val indice = alertas.indexOfFirst {
+            it.chave == chave && it.ativo
+        }
+
+        if (disparou && indice == -1) {
+
+            // Cria um novo alerta apenas se não existir outro ativo.
+            val novoAlerta = Alerta(
+                chave = chave,
+                titulo = titulo,
+                descricao = descricao,
+                gravidade = gravidade,
+                horario = horarioAtual()
+            )
+
+            alertas = (listOf(novoAlerta) + alertas).take(30)
+
+        } else if (!disparou && indice != -1) {
+
+            // Marca o alerta anterior como resolvido.
+            val listaAtualizada = alertas.toMutableList()
+
+            listaAtualizada[indice] = listaAtualizada[indice].copy(
+                ativo = false,
+                descricao = "Condição normalizada."
+            )
+
+            alertas = listaAtualizada
+        }
+    }
+
+    private fun avaliarAlertas(dados: DadosCaixa) {
+
+        // Temperatura acima de 35 °C
+        atualizarAlerta(
+            chave = "temperatura",
+            disparou = dados.temperatura?.let { it > 35.0 },
+            titulo = "Água muito quente",
+            descricao = "Temperatura acima do limite de 35 °C.",
+            gravidade = "Alta"
+        )
+
+        // Nível abaixo de 20%
+        atualizarAlerta(
+            chave = "nivel",
+            disparou = dados.nivelPercentual?.let { it < 20 },
+            titulo = "Nível baixo de água",
+            descricao = "O nível da caixa está abaixo de 20%.",
+            gravidade = "Média"
+        )
+
+        // pH fora da faixa de 6,5 até 8,5
+        atualizarAlerta(
+            chave = "ph",
+            disparou = dados.ph?.let {
+                it < 6.5 || it > 8.5
+            },
+            titulo = "pH fora da faixa recomendada",
+            descricao = "O pH da água está fora da faixa de 6,5 a 8,5.",
+            gravidade = "Média"
+        )
     }
 
     @Suppress("MissingPermission")
@@ -131,6 +232,7 @@ class MainActivity : ComponentActivity() {
                 val socket = dispositivo.createRfcommSocketToServiceRecord(sppUuid)
                 bluetoothSocket = socket
                 socket.connect()
+                enviarSincronizacaoHorario(socket)
 
                 runOnUiThread {
                     statusConexao = "Conectado a WaterTank_ESP32"
@@ -167,19 +269,36 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun processarLinhaBluetooth(linha: String) {
+
         try {
             val json = JSONObject(linha)
+
             val ph = json.optNullableDouble("ph")
             val tds = json.optNullableDouble("tds")
             val temperatura = json.optNullableDouble("temperatura")
             val vazao = json.optNullableDouble("vazao")
-            val falhas = if (json.has("falhas") && !json.isNull("falhas")) json.optInt("falhas") else null
-            val dataHora = if (json.has("data_hora") && !json.isNull("data_hora")) json.optString("data_hora") else null
-            val rtcValido = if (json.has("rtc_valido") && !json.isNull("rtc_valido")) json.optBoolean("rtc_valido") else null
+
+            val nivelPercentual = json.optNullableDouble("nivel_percentual")
+                ?.toInt()
+                ?.coerceIn(0, 100)
+
+            val falhas = if (json.has("falhas") && !json.isNull("falhas"))
+                json.optInt("falhas") else null
+
+            val dataHora = if (json.has("data_hora") && !json.isNull("data_hora"))
+                json.optString("data_hora") else null
+
+            val rtcValido = if (json.has("rtc_valido") && !json.isNull("rtc_valido")) {
+                json.optBoolean("rtc_valido")
+            } else {
+                null
+            }
 
             runOnUiThread {
-                dadosCaixa = dadosCaixa.copy(
+
+                val novosDados = dadosCaixa.copy(
                     sensorConectado = true,
+                    nivelPercentual = nivelPercentual,
                     ph = ph,
                     tds = tds,
                     temperatura = temperatura,
@@ -188,12 +307,20 @@ class MainActivity : ComponentActivity() {
                     dataHora = dataHora,
                     rtcValido = rtcValido
                 )
+
+                dadosCaixa = novosDados
+
+                // Avaliação automática dos alertas
+                avaliarAlertas(novosDados)
+
                 statusConexao = "Conectado a WaterTank_ESP32"
             }
+
         } catch (_: Exception) {
             // Ignora linhas que não sejam um JSON válido.
         }
     }
+
 
     private fun desconectarBluetooth() {
         pararLeitura = true
@@ -233,6 +360,17 @@ data class DadosCaixa(
     val dataHora: String? = null,
     val rtcValido: Boolean? = null
 )
+
+
+data class Alerta(
+    val chave: String,
+    val titulo: String,
+    val descricao: String,
+    val gravidade: String,
+    val horario: String,
+    val ativo: Boolean = true
+)
+
 
 @Composable
 fun InicioContent(
@@ -488,6 +626,7 @@ fun InfoCard(
 fun HomeScreen(
     dados: DadosCaixa,
     statusConexao: String,
+    alertas: List<Alerta>,
     onConectar: () -> Unit,
     onDesconectar: () -> Unit
 ) {
@@ -564,7 +703,7 @@ fun HomeScreen(
             when (paginaSelecionada) {
                 0 -> InicioContent(dados = dados.copy(capacidadeLitros = capacidadeLitros))
                 1 -> HistoricoContent()
-                2 -> AlertasContent()
+                2 -> AlertasContent(alertas = alertas)
                 3 -> ConfiguracoesContent(
                     estadoSelecionado = estadoSelecionado,
                     onEstadoSelecionado = {
@@ -622,23 +761,140 @@ fun HistoricoContent() {
 }
 
 @Composable
-fun AlertasContent() {
+fun AlertasContent(alertas: List<Alerta>) {
+
     PaginaBase(titulo = "Alertas") {
-        Text(
-            text = "Tudo tranquilo por aqui!",
-            color = Color(0xFF21834A),
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold
-        )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        if (alertas.isEmpty()) {
 
-        Text(
-            text = "Os avisos de nível baixo, nível alto e possíveis vazamentos aparecerão nesta página.",
-            color = Cinza
-        )
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color.White
+                ),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "✓",
+                        fontSize = 36.sp,
+                        color = Color(0xFF21834A)
+                    )
+
+                    Text(
+                        text = "Tudo tranquilo por aqui!",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF21834A)
+                    )
+
+                    Text(
+                        text = "Nenhum alerta registrado.",
+                        color = Cinza,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+
+        } else {
+
+            Text(
+                text = "Alertas recentes (${alertas.size})",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = Texto
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            alertas.forEach { alerta ->
+
+                val corAlerta = when (alerta.gravidade) {
+                    "Alta" -> Color(0xFFD32F2F)
+                    "Média" -> Color(0xFFE69A16)
+                    else -> Cinza
+                }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(16.dp),
+                    elevation = CardDefaults.cardElevation(2.dp)
+                ) {
+
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+
+                            Text(
+                                text = alerta.titulo,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp,
+                                color = Texto,
+                                modifier = Modifier.weight(1f)
+                            )
+
+                            Text(
+                                text = if (alerta.ativo) "ATIVO" else "RESOLVIDO",
+                                color = if (alerta.ativo)
+                                    corAlerta
+                                else
+                                    Color(0xFF21834A),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = alerta.descricao,
+                            color = Cinza,
+                            fontSize = 14.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+
+                            Text(
+                                text = "Gravidade: ${alerta.gravidade}",
+                                color = corAlerta,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+
+                            Text(
+                                text = alerta.horario,
+                                color = Cinza,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
+
 
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -823,13 +1079,15 @@ fun ConfiguracoesContent(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                OutlinedButton(
+                Button(
                     onClick = { editandoTarifa = false },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFD32F2F),
+                    contentColor = Color.White
+                )
                 ) {
-                    Text("Cancelar",
-                        color = Color.Red
-                    )
+                    Text("Cancelar")
                 }
             }
 
@@ -853,9 +1111,13 @@ fun ConfiguracoesContent(
             Spacer(modifier = Modifier.height(12.dp))
 
             if (statusConexao.startsWith("Conectado")) {
-                OutlinedButton(
+                Button(
                     onClick = onDesconectar,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFD32F2F),
+                        contentColor = Color.White
+                    )
                 ) {
                     Text("Desconectar")
                 }
