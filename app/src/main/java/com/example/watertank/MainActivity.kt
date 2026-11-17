@@ -50,6 +50,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import java.util.Locale
+import androidx.compose.material3.ButtonDefaults
 
 import com.example.watertank.ui.theme.WATERTANKTheme
 
@@ -93,7 +94,10 @@ class MainActivity : ComponentActivity() {
                     alertas = alertas,
                     statusConexao = statusConexao,
                     onConectar = { solicitarConexaoBluetooth() },
-                    onDesconectar = { desconectarBluetooth() }
+                    onDesconectar = { desconectarBluetooth() },
+                    onLimparAlertasResolvidos = {
+                        alertas = alertas.filter { it.ativo }
+                    }
                 )
             }
         }
@@ -179,7 +183,7 @@ class MainActivity : ComponentActivity() {
         // Temperatura acima de 35 °C
         atualizarAlerta(
             chave = "temperatura",
-            disparou = dados.temperatura?.let { it > 35.0 },
+            disparou = dados.temperatura?.let { it > 30.0 },
             titulo = "Água muito quente",
             descricao = "Temperatura acima do limite de 35 °C.",
             gravidade = "Alta"
@@ -628,7 +632,8 @@ fun HomeScreen(
     statusConexao: String,
     alertas: List<Alerta>,
     onConectar: () -> Unit,
-    onDesconectar: () -> Unit
+    onDesconectar: () -> Unit,
+    onLimparAlertasResolvidos: () -> Unit
 ) {
     var paginaSelecionada by rememberSaveable {
         mutableIntStateOf(0)
@@ -703,7 +708,10 @@ fun HomeScreen(
             when (paginaSelecionada) {
                 0 -> InicioContent(dados = dados.copy(capacidadeLitros = capacidadeLitros))
                 1 -> HistoricoContent()
-                2 -> AlertasContent(alertas = alertas)
+                2 -> AlertasContent(
+                    alertas = alertas,
+                    onLimparAlertasResolvidos = onLimparAlertasResolvidos
+                )
                 3 -> ConfiguracoesContent(
                     estadoSelecionado = estadoSelecionado,
                     onEstadoSelecionado = {
@@ -760,10 +768,31 @@ fun HistoricoContent() {
     }
 }
 
+
 @Composable
-fun AlertasContent(alertas: List<Alerta>) {
+fun AlertasContent(
+    alertas: List<Alerta>,
+    onLimparAlertasResolvidos: () -> Unit
+) {
+    val existemResolvidos = alertas.any { !it.ativo }
 
     PaginaBase(titulo = "Alertas") {
+
+        Button(
+            onClick = onLimparAlertasResolvidos,
+            enabled = existemResolvidos,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color.Red,
+                contentColor = Color.White
+            )
+        ) {
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Text("Limpar resolvidos")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
 
         if (alertas.isEmpty()) {
 
@@ -830,17 +859,14 @@ fun AlertasContent(alertas: List<Alerta>) {
                     shape = RoundedCornerShape(16.dp),
                     elevation = CardDefaults.cardElevation(2.dp)
                 ) {
-
                     Column(
                         modifier = Modifier.padding(16.dp)
                     ) {
-
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-
                             Text(
                                 text = alerta.titulo,
                                 fontWeight = FontWeight.Bold,
@@ -874,7 +900,6 @@ fun AlertasContent(alertas: List<Alerta>) {
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-
                             Text(
                                 text = "Gravidade: ${alerta.gravidade}",
                                 color = corAlerta,
@@ -894,6 +919,7 @@ fun AlertasContent(alertas: List<Alerta>) {
         }
     }
 }
+
 
 
 
